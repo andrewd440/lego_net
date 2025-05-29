@@ -1,0 +1,70 @@
+# Default configuration for 3D Shape Classification
+# Optimized for macOS Metal Performance Shaders
+
+model:
+  name: "VoxelCNN"
+  num_classes: 10
+  input_shape: [32, 32, 32]  # Voxel grid dimensions
+  channels: [32, 64, 128, 256]  # Channel progression
+  dropout_rate: 0.5
+  use_batch_norm: true
+  activation: "relu"
+  use_residual: false
+  feature_extraction_mode: false  # For future LEGO generation
+
+data:
+  dataset: "ModelNet10"
+  root_dir: "./data/ModelNet10"
+  voxel_size: 32
+  augmentation:
+    random_rotation: true
+    random_scale: true
+    scale_range: [0.8, 1.2]
+    random_noise: true
+    noise_std: 0.01
+  cache_dir: "./data/cache"
+  num_workers: 4  # Adjust based on CPU cores
+  prefetch_factor: 2
+
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  num_epochs: 100
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 15
+  validation_split: 0.2
+  save_best_only: true
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+  seed: 42
+  device: "mps"  # Use "cpu" if MPS not available
+
+optimizer:
+  type: "adam"
+  weight_decay: 0.0001  # 1e-4
+  betas: [0.9, 0.999]
+  
+scheduler:
+  type: "cosine"
+  warmup_epochs: 5
+  min_lr: 0.000001  # 1e-6
+
+logging:
+  use_wandb: false  # Set to true if you want to use Weights & Biases
+  project_name: "3d-shape-classification"
+  save_frequency: 5  # Save checkpoint every N epochs
+  log_interval: 10  # Log metrics every N batches
+  
+visualization:
+  colormap: "viridis"
+  point_size: 0.02
+  figure_size: [800, 600]
+  save_plots: true
+  plot_dir: "./plots"
+
+testing:
+  batch_size: 64
+  metrics: ["accuracy", "f1_score", "confusion_matrix"]
+  save_predictions: true
+  visualize_errors: true
+  num_visualizations: 20 
