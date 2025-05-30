@@ -2,7 +2,6 @@
 
 import numpy as np
 import torch
-import trimesh
 import open3d as o3d
 from typing import Tuple, Optional, Union
 from pathlib import Path
@@ -18,7 +17,7 @@ def mesh_to_voxels(
     Convert a 3D mesh to a voxel grid.
     
     Args:
-        mesh_path: Path to mesh file (OFF, OBJ, STL, etc.)
+        mesh_path: Path to mesh file (OFF, OBJ, STL, PLY, GLTF, GLB, FBX, etc.)
         voxel_size: Size of the voxel grid (will be cubic)
         normalize: Whether to normalize the mesh to unit cube
         padding: Padding factor for the bounding box
@@ -26,26 +25,33 @@ def mesh_to_voxels(
     Returns:
         Voxel grid tensor of shape (voxel_size, voxel_size, voxel_size)
     """
-    # Load mesh using trimesh for better format support
-    mesh = trimesh.load(mesh_path, force='mesh')
+    # Load mesh using Open3D
+    mesh = o3d.io.read_triangle_mesh(str(mesh_path))
+    
+    if not mesh.has_vertices():
+        raise ValueError(f"Mesh {mesh_path} has no vertices")
+    
+    # Get vertices as numpy array
+    vertices = np.asarray(mesh.vertices)
     
     if normalize:
         # Center mesh at origin
-        mesh.vertices -= mesh.vertices.mean(axis=0)
+        vertices -= vertices.mean(axis=0)
         
         # Scale to unit cube with padding
-        scale = (1.0 - 2 * padding) / np.max(np.abs(mesh.vertices))
-        mesh.vertices *= scale
+        scale = (1.0 - 2 * padding) / np.max(np.abs(vertices))
+        vertices *= scale
+        
+        # Update mesh vertices
+        mesh.vertices = o3d.utility.Vector3dVector(vertices)
     
-    # Convert to Open3D mesh for voxelization
-    o3d_mesh = o3d.geometry.TriangleMesh()
-    o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
-    o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
-    o3d_mesh.compute_vertex_normals()
+    # Compute vertex normals if not present
+    if not mesh.has_vertex_normals():
+        mesh.compute_vertex_normals()
     
     # Create voxel grid
     voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh(
-        o3d_mesh,
+        mesh,
         voxel_size=2.0 / voxel_size  # Adjust for unit cube
     )
     

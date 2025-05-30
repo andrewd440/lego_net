@@ -10,6 +10,7 @@ from sklearn.metrics import confusion_matrix, classification_report
 import plotly.graph_objects as go
 from tqdm import tqdm
 import argparse
+import math
 from pathlib import Path
 
 from src.models.voxel_cnn import VoxelCNN
@@ -151,8 +152,12 @@ def visualize_predictions(model, dataset, device, num_samples=10):
     
     indices = np.random.choice(len(dataset), num_samples, replace=False)
     
-    fig, axes = plt.subplots(2, 5, figsize=(15, 6))
-    axes = axes.ravel()
+    # Calculate grid dimensions (make sure we have enough subplots)
+    cols = 5  # Fixed number of columns
+    rows = math.ceil(num_samples / cols)  # Calculate required rows
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
+    axes = axes.ravel()  # Flatten the array for easier indexing
     
     for idx, i in enumerate(indices):
         voxel, label = dataset[i]
@@ -173,6 +178,11 @@ def visualize_predictions(model, dataset, device, num_samples=10):
                            f'({probs[pred]:.2f})',
                            color='green' if pred == label else 'red')
         axes[idx].axis('off')
+    
+    # Hide unused subplots
+    for idx in range(num_samples, len(axes)):
+        axes[idx].axis('off')
+        axes[idx].set_visible(False)
     
     plt.suptitle('Model Predictions (Green=Correct, Red=Wrong)')
     plt.tight_layout()

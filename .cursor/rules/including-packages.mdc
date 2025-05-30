@@ -1,0 +1,7 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Always ask before using new packages in the project.
+Try to keep package use at a respectable level.

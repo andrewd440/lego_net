@@ -1,0 +1,19 @@
+Model: checkpoints/best_model.pt
+Overall Accuracy: 0.0396
+
+              precision    recall  f1-score   support
+
+     bathtub       0.00      0.00      0.00        50
+         bed       0.00      0.00      0.00       100
+       chair       0.00      0.00      0.00       100
+        desk       0.00      0.00      0.00        86
+     dresser       0.06      0.34      0.10        86
+     monitor       0.02      0.02      0.02       100
+ night_stand       0.06      0.05      0.05        86
+        sofa       0.00      0.00      0.00       100
+       table       0.00      0.00      0.00       100
+      toilet       0.08      0.01      0.02       100
+
+    accuracy                           0.04       908
+   macro avg       0.02      0.04      0.02       908
+weighted avg       0.02      0.04      0.02       908

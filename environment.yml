@@ -1,0 +1,47 @@
+name: torch3d
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  # Python version
+  - python=3.10
+  
+  # Core scientific packages with explicit version constraints
+  - numpy>=1.21,<3.0  # Compatible with modern PyTorch versions
+  - scipy
+  - scikit-learn
+  - pandas
+  
+  # PyTorch ecosystem - let conda resolve best versions
+  - pytorch
+  - torchvision
+  - torchaudio
+  
+  # Visualization
+  - matplotlib
+  - seaborn
+  - plotly
+  
+  # Jupyter ecosystem
+  - jupyter
+  - jupyterlab
+  - ipykernel
+  - ipywidgets
+  
+  # File formats and utilities
+  - h5py
+  - pillow
+  
+  # Development tools
+  - tqdm
+  - tensorboard
+  
+  # ML monitoring
+  - wandb
+  
+  # Only pip packages that aren't available in conda
+  - pip
+  - pip:
+    # 3D packages not available in conda
+    - open3d==0.19.0  # Updated to latest version with macOS M-series fixes

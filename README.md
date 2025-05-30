@@ -14,6 +14,10 @@ This project implements a 3D CNN architecture optimized for macOS Metal Performa
 - **Interactive Visualization**: Web-based 3D voxel rendering with Plotly
 - **Modular Architecture**: Easily extensible for LEGO generation tasks
 
+## Dev Environment
+- Mac M2 Pro
+- Conda environment
+
 ## Quick Start
 
 ### 1. Environment Setup

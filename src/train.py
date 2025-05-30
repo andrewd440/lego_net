@@ -1,445 +1,222 @@
 #!/usr/bin/env python3
-"""Main training script for 3D shape classification"""
-
-import argparse
-import os
-import sys
-import time
-import json
-from pathlib import Path
-from datetime import datetime
-from typing import Dict, Any, Optional
+"""Retrain model with proper augmentation to fix overfitting"""
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
+from torch.utils.data import DataLoader
 import numpy as np
-import wandb
+from tqdm import tqdm
+import argparse
+import sys
+from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.models import create_model
-from src.data.dataset import create_dataloaders
-from src.utils.config import load_config, save_config
-from src.utils.metrics import calculate_metrics, plot_confusion_matrix
-from src.utils.visualization import plot_training_history
+from src.models.voxel_cnn import VoxelCNN
+from src.data.dataset import ModelNet10Voxels
+from src.utils.config import load_config
+from src.data.transforms_simple import get_simple_augmentations
 
 
-class Trainer:
-    """Training manager for 3D shape classification"""
+def apply_augmentation(voxel, augmentations):
+    """Apply augmentations to a voxel tensor"""
+    for aug in augmentations:
+        voxel = aug(voxel)
+    return voxel
+
+
+def train_epoch(model, loader, optimizer, criterion, device, augmentations=None):
+    """Train for one epoch with augmentation"""
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
     
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.device = self._setup_device()
-        self.start_time = datetime.now()
+    for voxels, labels in tqdm(loader, desc="Training"):
+        voxels = voxels.to(device)
+        labels = labels.to(device)
         
-        # Setup directories
-        self._setup_directories()
+        # Apply augmentations
+        if augmentations:
+            augmented_voxels = []
+            for i in range(voxels.size(0)):
+                aug_voxel = apply_augmentation(voxels[i], augmentations)
+                augmented_voxels.append(aug_voxel)
+            voxels = torch.stack(augmented_voxels)
         
-        # Setup logging
-        self.writer = SummaryWriter(self.log_dir)
-        self.use_wandb = config['logging']['use_wandb']
+        # Add channel dimension
+        if voxels.dim() == 4:
+            voxels = voxels.unsqueeze(1)
         
-        if self.use_wandb:
-            wandb.init(
-                project=config['logging']['project_name'],
-                config=config,
-                name=f"run_{self.start_time.strftime('%Y%m%d_%H%M%S')}",
-            )
+        optimizer.zero_grad()
+        outputs = model(voxels)
+        loss = criterion(outputs, labels)
         
-        # Initialize history
-        self.history = {
-            'train_loss': [],
-            'train_acc': [],
-            'val_loss': [],
-            'val_acc': [],
-            'learning_rates': [],
-        }
+        loss.backward()
         
-        # Best model tracking
-        self.best_val_acc = 0.0
-        self.best_val_loss = float('inf')
-        self.epochs_without_improvement = 0
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         
-    def _setup_device(self) -> torch.device:
-        """Setup compute device"""
-        device_name = self.config['training']['device']
+        optimizer.step()
         
-        if device_name == 'mps' and torch.backends.mps.is_available():
-            device = torch.device('mps')
-            print(f"Using Metal Performance Shaders (MPS)")
-        elif device_name == 'cuda' and torch.cuda.is_available():
-            device = torch.device('cuda')
-            print(f"Using CUDA GPU: {torch.cuda.get_device_name()}")
-        else:
-            device = torch.device('cpu')
-            print("Using CPU")
-        
-        return device
+        running_loss += loss.item()
+        _, predicted = outputs.max(1)
+        total += labels.size(0)
+        correct += predicted.eq(labels).sum().item()
     
-    def _setup_directories(self):
-        """Create necessary directories"""
-        self.checkpoint_dir = Path(self.config['training']['checkpoint_dir'])
-        self.log_dir = Path(self.config['training']['log_dir'])
-        self.plot_dir = Path(self.config['visualization']['plot_dir'])
-        
-        for dir_path in [self.checkpoint_dir, self.log_dir, self.plot_dir]:
-            dir_path.mkdir(parents=True, exist_ok=True)
+    return running_loss / len(loader), 100. * correct / total
+
+
+def validate(model, loader, criterion, device):
+    """Validate the model"""
+    model.eval()
+    running_loss = 0.0
+    correct = 0
+    total = 0
     
-    def train(self):
-        """Main training loop"""
-        print("="*60)
-        print("Starting 3D Shape Classification Training")
-        print("="*60)
-        
-        # Save configuration
-        save_config(
-            self.config,
-            self.checkpoint_dir / f"config_{self.start_time.strftime('%Y%m%d_%H%M%S')}.yaml"
-        )
-        
-        # Create data loaders
-        print("\nPreparing data...")
-        train_loader, val_loader = create_dataloaders(self.config)
-        print(f"Train samples: {len(train_loader.dataset)}")
-        print(f"Validation samples: {len(val_loader.dataset)}")
-        
-        # Create model
-        print("\nInitializing model...")
-        model = create_model(self.config).to(self.device)
-        
-        # Print model info
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Total parameters: {total_params:,}")
-        print(f"Trainable parameters: {trainable_params:,}")
-        
-        # Setup optimizer and scheduler
-        optimizer = self._create_optimizer(model)
-        scheduler = self._create_scheduler(optimizer)
-        criterion = nn.CrossEntropyLoss()
-        
-        # Training loop
-        print("\nStarting training...")
-        for epoch in range(self.config['training']['num_epochs']):
-            # Train
-            train_loss, train_acc = self._train_epoch(
-                model, train_loader, optimizer, criterion, epoch
-            )
+    with torch.no_grad():
+        for voxels, labels in tqdm(loader, desc="Validating"):
+            voxels = voxels.to(device)
+            labels = labels.to(device)
             
-            # Validate
-            val_loss, val_acc = self._validate(
-                model, val_loader, criterion, epoch
-            )
+            if voxels.dim() == 4:
+                voxels = voxels.unsqueeze(1)
             
-            # Update learning rate
-            if scheduler is not None:
-                scheduler.step()
-                current_lr = scheduler.get_last_lr()[0]
-            else:
-                current_lr = optimizer.param_groups[0]['lr']
+            outputs = model(voxels)
+            loss = criterion(outputs, labels)
             
-            # Log metrics
-            self._log_metrics(epoch, train_loss, train_acc, val_loss, val_acc, current_lr)
-            
-            # Save checkpoint
-            is_best = val_acc > self.best_val_acc
-            if is_best:
-                self.best_val_acc = val_acc
-                self.best_val_loss = val_loss
-                self.epochs_without_improvement = 0
-            else:
-                self.epochs_without_improvement += 1
-            
-            if epoch % self.config['logging']['save_frequency'] == 0 or is_best:
-                self._save_checkpoint(
-                    model, optimizer, epoch, val_acc, val_loss, is_best
-                )
-            
-            # Early stopping
-            if self.epochs_without_improvement >= self.config['training']['early_stopping_patience']:
-                print(f"\nEarly stopping triggered after {epoch+1} epochs")
-                break
-        
-        # Training complete
-        print("\n" + "="*60)
-        print("Training Complete!")
-        print(f"Best validation accuracy: {self.best_val_acc:.2%}")
-        print(f"Best validation loss: {self.best_val_loss:.4f}")
-        print("="*60)
-        
-        # Save final plots
-        self._save_final_plots()
-        
-        # Cleanup
-        self.writer.close()
-        if self.use_wandb:
-            wandb.finish()
-    
-    def _train_epoch(self, model, loader, optimizer, criterion, epoch):
-        """Train for one epoch"""
-        model.train()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-        
-        pbar = tqdm(loader, desc=f"Epoch {epoch+1} [Train]")
-        for batch_idx, (inputs, targets) in enumerate(pbar):
-            inputs = inputs.to(self.device)
-            targets = targets.to(self.device)
-            
-            # Add channel dimension if needed
-            if inputs.dim() == 4:
-                inputs = inputs.unsqueeze(1)
-            
-            # Forward pass
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            
-            # Backward pass
-            loss.backward()
-            
-            # Gradient clipping
-            if self.config['training']['gradient_clip_norm'] > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    self.config['training']['gradient_clip_norm']
-                )
-            
-            optimizer.step()
-            
-            # Statistics
             running_loss += loss.item()
             _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-            
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': f"{loss.item():.4f}",
-                'acc': f"{100.*correct/total:.2f}%"
-            })
-            
-            # Log batch metrics
-            if batch_idx % self.config['logging']['log_interval'] == 0:
-                step = epoch * len(loader) + batch_idx
-                self.writer.add_scalar('batch/train_loss', loss.item(), step)
-                self.writer.add_scalar('batch/train_acc', 100.*correct/total, step)
-        
-        epoch_loss = running_loss / len(loader)
-        epoch_acc = 100. * correct / total
-        
-        return epoch_loss, epoch_acc
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
     
-    def _validate(self, model, loader, criterion, epoch):
-        """Validate the model"""
-        model.eval()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-        
-        all_predictions = []
-        all_targets = []
-        
-        with torch.no_grad():
-            pbar = tqdm(loader, desc=f"Epoch {epoch+1} [Val]")
-            for inputs, targets in pbar:
-                inputs = inputs.to(self.device)
-                targets = targets.to(self.device)
-                
-                if inputs.dim() == 4:
-                    inputs = inputs.unsqueeze(1)
-                
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
-                
-                running_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-                
-                # Collect for metrics
-                all_predictions.extend(predicted.cpu().numpy())
-                all_targets.extend(targets.cpu().numpy())
-                
-                pbar.set_postfix({
-                    'loss': f"{loss.item():.4f}",
-                    'acc': f"{100.*correct/total:.2f}%"
-                })
-        
-        epoch_loss = running_loss / len(loader)
-        epoch_acc = 100. * correct / total
-        
-        # Calculate additional metrics
-        metrics = calculate_metrics(
-            np.array(all_predictions),
-            np.array(all_targets)
-        )
-        
-        # Log validation metrics
-        self.writer.add_scalar('epoch/val_precision', metrics['precision'], epoch)
-        self.writer.add_scalar('epoch/val_recall', metrics['recall'], epoch)
-        self.writer.add_scalar('epoch/val_f1', metrics['f1_score'], epoch)
-        
-        return epoch_loss, epoch_acc
-    
-    def _create_optimizer(self, model):
-        """Create optimizer"""
-        opt_config = self.config['optimizer']
-        
-        if opt_config['type'] == 'adam':
-            optimizer = optim.Adam(
-                model.parameters(),
-                lr=self.config['training']['learning_rate'],
-                weight_decay=opt_config['weight_decay'],
-                betas=opt_config['betas'],
-            )
-        elif opt_config['type'] == 'sgd':
-            optimizer = optim.SGD(
-                model.parameters(),
-                lr=self.config['training']['learning_rate'],
-                momentum=0.9,
-                weight_decay=opt_config['weight_decay'],
-            )
-        else:
-            raise ValueError(f"Unknown optimizer: {opt_config['type']}")
-        
-        return optimizer
-    
-    def _create_scheduler(self, optimizer):
-        """Create learning rate scheduler"""
-        sched_config = self.config['scheduler']
-        
-        if sched_config['type'] == 'cosine':
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=self.config['training']['num_epochs'],
-                eta_min=sched_config['min_lr'],
-            )
-        elif sched_config['type'] == 'step':
-            scheduler = optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=30,
-                gamma=0.1,
-            )
-        else:
-            scheduler = None
-        
-        return scheduler
-    
-    def _log_metrics(self, epoch, train_loss, train_acc, val_loss, val_acc, lr):
-        """Log metrics to tensorboard and wandb"""
-        # Update history
-        self.history['train_loss'].append(train_loss)
-        self.history['train_acc'].append(train_acc)
-        self.history['val_loss'].append(val_loss)
-        self.history['val_acc'].append(val_acc)
-        self.history['learning_rates'].append(lr)
-        
-        # TensorBoard
-        self.writer.add_scalar('epoch/train_loss', train_loss, epoch)
-        self.writer.add_scalar('epoch/train_acc', train_acc, epoch)
-        self.writer.add_scalar('epoch/val_loss', val_loss, epoch)
-        self.writer.add_scalar('epoch/val_acc', val_acc, epoch)
-        self.writer.add_scalar('epoch/learning_rate', lr, epoch)
-        
-        # Weights & Biases
-        if self.use_wandb:
-            wandb.log({
-                'epoch': epoch,
-                'train_loss': train_loss,
-                'train_acc': train_acc,
-                'val_loss': val_loss,
-                'val_acc': val_acc,
-                'learning_rate': lr,
-            })
-        
-        # Print summary
-        print(f"\nEpoch {epoch+1} Summary:")
-        print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
-        print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
-        print(f"  Learning Rate: {lr:.6f}")
-    
-    def _save_checkpoint(self, model, optimizer, epoch, val_acc, val_loss, is_best):
-        """Save model checkpoint"""
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'val_acc': val_acc,
-            'val_loss': val_loss,
-            'config': self.config,
-            'history': self.history,
-        }
-        
-        # Save regular checkpoint
-        checkpoint_path = self.checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pt"
-        torch.save(checkpoint, checkpoint_path)
-        
-        # Save best model
-        if is_best:
-            best_path = self.checkpoint_dir / "best_model.pt"
-            torch.save(checkpoint, best_path)
-            print(f"  → Saved best model (val_acc: {val_acc:.2f}%)")
-    
-    def _save_final_plots(self):
-        """Save final training plots"""
-        # Training history
-        fig, axes = plot_training_history(
-            self.history,
-            save_path=self.plot_dir / "training_history.png",
-            show=False
-        )
-        
-        # Save history as JSON
-        with open(self.plot_dir / "training_history.json", 'w') as f:
-            json.dump(self.history, f, indent=2)
+    return running_loss / len(loader), 100. * correct / total
 
 
 def main():
-    """Main entry point"""
-    parser = argparse.ArgumentParser(description="Train 3D Shape Classification Model")
-    parser.add_argument(
-        '--config',
-        type=str,
-        default='configs/default.yaml',
-        help='Path to configuration file'
-    )
-    parser.add_argument(
-        '--resume',
-        type=str,
-        default=None,
-        help='Path to checkpoint to resume from'
-    )
-    parser.add_argument(
-        '--device',
-        type=str,
-        choices=['cpu', 'cuda', 'mps'],
-        default=None,
-        help='Override device from config'
-    )
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
+    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
     args = parser.parse_args()
     
-    # Load configuration
-    config = load_config(args.config)
+    # Load config
+    config = load_config('configs/default.yaml')
     
-    # Override device if specified
-    if args.device:
-        config['training']['device'] = args.device
+    # Override some settings for better generalization
+    config['model']['dropout_rate'] = 0.5  # Keep high dropout
+    config['training']['batch_size'] = args.batch_size
+    config['training']['learning_rate'] = args.lr
     
-    # Set random seeds for reproducibility
-    seed = config['training']['seed']
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    # Setup device
+    device = torch.device('mps' if torch.backends.mps.is_available() else 
+                         'cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
     
-    # Create trainer and start training
-    trainer = Trainer(config)
-    trainer.train()
+    # Create datasets WITHOUT transforms (we'll apply them manually)
+    train_dataset = ModelNet10Voxels(
+        root_dir=config['data']['root_dir'],
+        split='train',
+        voxel_size=config['data']['voxel_size'],
+        config=None  # Don't use config transforms
+    )
+    
+    test_dataset = ModelNet10Voxels(
+        root_dir=config['data']['root_dir'],
+        split='test',
+        voxel_size=config['data']['voxel_size'],
+        config=None
+    )
+    
+    # Split train into train/val
+    val_split = 0.2
+    n_val = int(len(train_dataset) * val_split)
+    n_train = len(train_dataset) - n_val
+    
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        train_dataset, [n_train, n_val],
+        generator=torch.Generator().manual_seed(42)
+    )
+    
+    # Create dataloaders
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
+                            shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
+                          shuffle=False, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, 
+                           shuffle=False, num_workers=4)
+    
+    print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+    
+    # Create augmentations that work on MPS
+    augmentations = get_simple_augmentations()
+    
+    # Create model
+    model = VoxelCNN(config).to(device)
+    
+    # Use AdamW with weight decay for better regularization
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    
+    # Cosine annealing scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    
+    criterion = nn.CrossEntropyLoss()
+    
+    # Training loop
+    best_val_acc = 0.0
+    checkpoint_dir = Path('checkpoints')
+    checkpoint_dir.mkdir(exist_ok=True)
+    
+    for epoch in range(args.epochs):
+        print(f"\nEpoch {epoch+1}/{args.epochs}")
+        
+        # Train
+        train_loss, train_acc = train_epoch(
+            model, train_loader, optimizer, criterion, device, augmentations
+        )
+        
+        # Validate
+        val_loss, val_acc = validate(model, val_loader, criterion, device)
+        
+        # Test (for monitoring)
+        test_loss, test_acc = validate(model, test_loader, criterion, device)
+        
+        scheduler.step()
+        
+        print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
+        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+        print(f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%")
+        print(f"LR: {scheduler.get_last_lr()[0]:.6f}")
+        
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_acc': val_acc,
+                'val_loss': val_loss,
+                'test_acc': test_acc,
+                'config': config
+            }, checkpoint_dir / 'best_model.pt')
+            
+            # Also save epoch checkpoint
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_acc': val_acc,
+                'val_loss': val_loss,
+                'test_acc': test_acc,
+                'config': config
+            }, checkpoint_dir / f'checkpoint_epoch_{epoch+1}.pt')
+            
+            print(f"✓ Saved new best model with val_acc: {val_acc:.2f}%, test_acc: {test_acc:.2f}%")
+    
+    print(f"\nTraining complete! Best validation accuracy: {best_val_acc:.2f}%")
 
 
 if __name__ == "__main__":

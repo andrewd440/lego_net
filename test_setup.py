@@ -7,6 +7,10 @@ import os
 # Set matplotlib backend before importing to avoid font issues
 os.environ['MPLBACKEND'] = 'Agg'
 
+# Prevent OpenBLAS threading conflicts that cause Open3D segfaults on macOS
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import torch
 import numpy as np
 from pathlib import Path
@@ -34,16 +38,14 @@ def print_status(message, status='info'):
 
 def test_imports():
     """Test all required imports"""
-    print("\n1. Testing imports...")
+    print("\n1. Testing imports...")    
     
     modules = [
+        ('open3d', 'Open3D'),  # Import Open3D FIRST before NumPy
         ('torch', 'PyTorch'),
         ('torchvision', 'TorchVision'),
-        ('numpy', 'NumPy'),
-        ('open3d', 'Open3D'),
-        ('trimesh', 'Trimesh'),
+        ('numpy', 'NumPy'),  # NumPy after Open3D
         ('plotly', 'Plotly'),
-        ('yaml', 'PyYAML'),
         ('h5py', 'H5Py'),
         ('tqdm', 'TQDM'),
         ('sklearn', 'Scikit-learn'),
