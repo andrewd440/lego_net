@@ -1,5 +1,5 @@
-# Default configuration for 3D Shape Classification
-# Optimized for macOS Metal Performance Shaders
+# Configuration for Lambda Labs GPU instances
+# Optimized for NVIDIA GPUs (A10, A100, H100, etc.)
 
 model:
   name: "VoxelCNN"
@@ -23,11 +23,11 @@ data:
     random_noise: true
     noise_std: 0.01
   cache_dir: "./data/cache"
-  num_workers: 4  # Adjust based on CPU cores
-  prefetch_factor: 2
+  num_workers: 8  # Lambda Labs instances typically have more CPU cores
+  prefetch_factor: 4  # Increased for better GPU utilization
 
 training:
-  batch_size: 32
+  batch_size: 64  # Increased for GPU memory (adjust based on GPU)
   learning_rate: 0.001
   num_epochs: 100
   gradient_clip_norm: 1.0
@@ -37,7 +37,8 @@ training:
   checkpoint_dir: "./checkpoints"
   log_dir: "./logs"
   seed: 42
-  device: "cuda"  # Changed from "mps" to "cuda" for Lambda Labs GPUs
+  device: "cuda"  # NVIDIA GPU
+  mixed_precision: true  # Enable AMP for faster training on NVIDIA GPUs
 
 optimizer:
   type: "adam"
@@ -50,8 +51,8 @@ scheduler:
   min_lr: 0.000001  # 1e-6
 
 logging:
-  use_wandb: false  # Set to true if you want to use Weights & Biases
-  project_name: "3d-shape-classification"
+  use_wandb: true  # Enable W&B for remote monitoring
+  project_name: "3d-shape-classification-lambda"
   save_frequency: 5  # Save checkpoint every N epochs
   log_interval: 10  # Log metrics every N batches
   
@@ -63,7 +64,7 @@ visualization:
   plot_dir: "./plots"
 
 testing:
-  batch_size: 64
+  batch_size: 128  # Larger batch for GPU inference
   metrics: ["accuracy", "f1_score", "confusion_matrix"]
   save_predictions: true
   visualize_errors: true
