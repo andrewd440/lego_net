@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast
 import numpy as np
 from tqdm import tqdm
 import argparse
@@ -27,12 +28,14 @@ def apply_augmentation(voxel, augmentations):
     return voxel
 
 
-def train_epoch(model, loader, optimizer, criterion, device, augmentations=None):
+def train_epoch(model, loader, optimizer, criterion, device, augmentations=None, use_amp=False):
     """Train for one epoch with augmentation"""
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
+    
+    scaler = GradScaler() if use_amp else None
     
     for voxels, labels in tqdm(loader, desc="Training"):
         voxels = voxels.to(device)
@@ -51,15 +54,24 @@ def train_epoch(model, loader, optimizer, criterion, device, augmentations=None)
             voxels = voxels.unsqueeze(1)
         
         optimizer.zero_grad()
-        outputs = model(voxels)
-        loss = criterion(outputs, labels)
         
-        loss.backward()
-        
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        
-        optimizer.step()
+        # Mixed precision forward pass
+        if use_amp:
+            with autocast():
+                outputs = model(voxels)
+                loss = criterion(outputs, labels)
+            
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            outputs = model(voxels)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
         
         running_loss += loss.item()
         _, predicted = outputs.max(1)
@@ -69,7 +81,7 @@ def train_epoch(model, loader, optimizer, criterion, device, augmentations=None)
     return running_loss / len(loader), 100. * correct / total
 
 
-def validate(model, loader, criterion, device):
+def validate(model, loader, criterion, device, use_amp=False):
     """Validate the model"""
     model.eval()
     running_loss = 0.0
@@ -84,8 +96,14 @@ def validate(model, loader, criterion, device):
             if voxels.dim() == 4:
                 voxels = voxels.unsqueeze(1)
             
-            outputs = model(voxels)
-            loss = criterion(outputs, labels)
+            # Mixed precision inference
+            if use_amp:
+                with autocast():
+                    outputs = model(voxels)
+                    loss = criterion(outputs, labels)
+            else:
+                outputs = model(voxels)
+                loss = criterion(outputs, labels)
             
             running_loss += loss.item()
             _, predicted = outputs.max(1)
@@ -114,6 +132,13 @@ def main():
     device = torch.device('mps' if torch.backends.mps.is_available() else 
                          'cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    # Check if mixed precision is supported and enabled
+    use_amp = config['training'].get('mixed_precision', False) and device.type == 'cuda'
+    if use_amp:
+        print("Mixed precision training enabled")
+    elif config['training'].get('mixed_precision', False) and device.type != 'cuda':
+        print("Mixed precision requested but not available on non-CUDA device")
     
     # Create datasets WITHOUT transforms (we'll apply them manually)
     train_dataset = ModelNet10Voxels(
@@ -174,14 +199,14 @@ def main():
         
         # Train
         train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, criterion, device, augmentations
+            model, train_loader, optimizer, criterion, device, augmentations, use_amp
         )
         
         # Validate
-        val_loss, val_acc = validate(model, val_loader, criterion, device)
+        val_loss, val_acc = validate(model, val_loader, criterion, device, use_amp)
         
         # Test (for monitoring)
-        test_loss, test_acc = validate(model, test_loader, criterion, device)
+        test_loss, test_acc = validate(model, test_loader, criterion, device, use_amp)
         
         scheduler.step()
         
